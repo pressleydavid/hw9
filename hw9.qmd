@@ -1,0 +1,803 @@
+---
+format: html
+editor: visual
+---
+
+# Homework 9
+
+```{r, message=FALSE, echo=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(lubridate)
+library(corrplot)
+library(gridExtra)
+library(baguette)
+library(parsnip)
+library(ranger)
+library(vip)
+
+```
+
+### Read Data
+
+```{r, message=FALSE, echo=FALSE}
+soul_bikes <- read_csv("https://www4.stat.ncsu.edu/~online/datasets/SeoulBikeData.csv",
+                        locale = locale(encoding = "latin1"))
+
+names(soul_bikes)
+
+#Transform:
+#- dates to datetime formats
+#- snake_case vars
+# Clean and transform the data
+soul_bikes_clean <- soul_bikes |>
+  clean_names() |>  # This will convert "Functioning Day" to "functioning_day"
+  mutate(
+    date = dmy(date),
+    seasons = as.factor(seasons),
+    holiday = as.factor(holiday),
+    functioning_day = as.factor(functioning_day)
+  )
+
+
+# Check column names to verify
+names(soul_bikes_clean)
+
+# Then filter
+soul_bikes_functioning <- soul_bikes_clean[soul_bikes_clean$functioning_day == "Yes", ]
+```
+
+## Basic EDA
+### Check for missing values
+### Create Summary Stats for Numerics and Character/Factor variables
+### Create Daily Summary means and totals
+```{r}
+#Basic EDA
+#Missing values
+missing_summ <- soul_bikes |>
+  summarize(across(everything(), \(x) sum(is.na(x)))) |>
+  pivot_longer(everything(),
+                names_to = "variable",
+                values_to = "missing_count")
+missing_summ
+
+#By variable summary stats for numerics
+bike_summ_nums <- soul_bikes_functioning |>
+  select(where(is.numeric)) |>
+  summarize(across(everything(),
+                   list(
+                     mean = \(x) mean(x, na.rm = TRUE),
+                     sd = \(x) sd(x, na.rm = TRUE),
+                     median = \(x) median(x, na.rm = TRUE),
+                     iqr = \(x) IQR(x, na.rm = TRUE),
+                     min = \(x) min(x, na.rm = TRUE),
+                     max = \(x) max(x, na.rm = TRUE),
+                     n_missing = \(x) sum(is.na(x))
+                   ))) |>
+              pivot_longer(
+                everything(),
+                names_to = c("column", "stat"),
+                names_pattern = "(.*)_(.*)",
+                values_to = "values"
+              )
+
+#By variable summary stats for character/factor
+bike_summ_cats <- soul_bikes_functioning |>
+  select(where(is.character), where(is.factor)) |>
+  summarize(across(everything(),
+    list(
+      n_unique = \(x) n_distinct(x),
+      n_missing = \(x) sum(is.na(x))
+    )
+  )) |>
+  pivot_longer(
+    everything(),
+    names_to = c("column", "stat"),
+    names_pattern = "(.*)_(.*)",
+    values_to = "value"
+  )
+
+# Factor levels summary
+factor_levels <- soul_bikes_functioning |>
+  select(where(is.factor), where(is.character)) |>
+  summarize(across(everything(), \(x) list(sort(unique(x))))) |>
+  pivot_longer(
+    everything(),
+    names_to = "column",
+    values_to = "levels"
+  ) |>
+  mutate(
+    n_levels = map_int(levels, length),
+    levels = map_chr(levels, toString)
+  )
+
+#7. Summarize across hours
+daily_summ <- soul_bikes_functioning |>
+  group_by(date, seasons, holiday) |>
+  summarize(
+    #totals
+    total_bikes = sum(rented_bike_count),
+    total_rainfall = sum(rainfall_mm),
+    total_snowfall = sum(snowfall_cm),
+
+    #weather means
+    avg_temp = mean(temperature_c),
+    avg_humidity = mean(humidity_percent),
+    avg_wind_speed = mean(wind_speed_m_s),
+    avg_visibility = mean(visibility_10m),
+    avg_dew_point = mean(dew_point_temperature_c),
+    avg_solar_rad = mean(solar_radiation_mj_m2),
+    .groups = "drop"  # Drop grouping after summary
+  )
+daily_summ
+
+#Summaries of numerics
+bike_summ_nums <- daily_summ |>
+  select(where(is.numeric)) |>
+  summarize(across(everything(),
+                   list(
+                     mean = \(x) mean(x, na.rm = TRUE),
+                     sd = \(x) sd(x, na.rm = TRUE),
+                     median = \(x) median(x, na.rm = TRUE),
+                     iqr = \(x) IQR(x, na.rm = TRUE),
+                     min = \(x) min(x, na.rm = TRUE),
+                     max = \(x) max(x, na.rm = TRUE),
+                     n_missing = \(x) sum(is.na(x))
+                   ))) |>
+  pivot_longer(
+    everything(),
+    names_to = c("column", "stat"),
+    names_pattern = "(.*)_(.*)",
+    values_to = "values"
+  )
+bike_summ_nums
+```
+
+## Plots
+#### Calculate Correlation Matrix 
+#### Create Plots for top 4 correlations
+```{r}
+# Calculate correlation matrix
+cor_matrix <- daily_summ |>
+  select(total_bikes, avg_temp, avg_humidity, avg_wind_speed,
+         avg_visibility, avg_solar_rad, total_rainfall, total_snowfall) |>
+  cor(use = "complete.obs")
+cor_matrix
+# Create correlation plot
+corrplot(cor_matrix,
+         method = "color",
+         type = "upper",
+         addCoef.col = "black",
+         tl.col = "black",
+         tl.srt = 45,
+         diag = FALSE)
+
+# Individual scatter plots with trend lines
+temp_v_rentals <- ggplot(daily_summ, aes(x = avg_temp, y = total_bikes)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", color = "red") +
+  labs(title = "Temperature vs Bike Rentals",
+       x = "Average Temperature (°C)",
+       y = "Total Daily Rentals") +
+  theme_minimal()
+
+humid_v_rentals <- ggplot(daily_summ, aes(x = avg_humidity, y = total_bikes)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", color = "blue") +
+  labs(title = "Humidity vs Bike Rentals",
+       x = "Average Humidity (%)",
+       y = "Total Daily Rentals") +
+  theme_minimal()
+
+sun_v_rentals <- ggplot(daily_summ, aes(x = avg_solar_rad, y = total_bikes)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", color = "orange") +
+  labs(title = "Solar Radiation vs Bike Rentals",
+       x = "Average Solar Radiation (MJ/m2)",
+       y = "Total Daily Rentals") +
+  theme_minimal()
+
+vis_v_rentals <- ggplot(daily_summ, aes(x = avg_visibility, y = total_bikes)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", color = "green4") +
+  labs(title = "Visibility vs Bike Rentals",
+       x = "Average Visibility (10m)",
+       y = "Total Daily Rentals") +
+  theme_minimal()
+
+# Arrange plots in a grid
+
+grid.arrange(temp_v_rentals, humid_v_rentals, sun_v_rentals, vis_v_rentals, ncol = 2)
+```
+
+## MLR
+### Fit a Multiple Linear Regression Model using 3 specified Recipes
+```{r,  message=FALSE, echo=FALSE}
+#Split the data
+set.seed(123)
+bike_split <- initial_split(daily_summ,
+                            prop = 0.75,
+                            strata = seasons)
+
+trn <- training(bike_split)
+tst <- testing(bike_split)
+folds <- vfold_cv(trn, v = 10, strata = seasons)
+
+
+#Fitting MLR Models
+#Recipe 1
+recipe_1 <- recipe(total_bikes ~ ., data = trn) |>
+  update_role(date, new_role = "ID") |>
+  # Extract day of week and create weekend factor
+  step_date(date, features = "dow") |>
+  step_mutate(
+    weekend = factor(
+      if_else(date_dow %in% c("Sat", "Sun"), "weekend", "weekday"),
+      levels = c("weekday", "weekend")  # explicitly set levels
+    )
+  ) |>
+  # Remove the intermediate date_dow variable
+  step_rm(date_dow) |>
+  # Standardize numeric variables
+  step_normalize(all_numeric_predictors()) |>
+  # Create dummy variables
+  step_dummy(all_nominal_predictors())
+
+
+recipe_1 |>
+  prep() |>
+  bake(new_data = NULL) |>
+  glimpse()
+
+
+#Recipe 2
+recipe_2 <- recipe(total_bikes ~ ., data = trn) |>
+  update_role(date, new_role = "ID") |>
+  step_date(date, features = "dow") |>
+  step_mutate(
+    weekend = factor(
+      if_else(date_dow %in% c("Sat", "Sun"), "weekend", "weekday"),
+      levels = c("weekday", "weekend")
+    )
+  ) |>
+  step_rm(date_dow) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  # Changed interaction syntax to use explicit formulas
+  step_interact(terms = ~ starts_with("seasons_"):starts_with("holiday_")) |>
+  step_interact(terms = ~ starts_with("seasons_"):avg_temp) |>
+  step_interact(terms = ~ total_rainfall:avg_temp)
+
+recipe_2 |>
+  prep() |>
+  bake(new_data = NULL) |>
+  glimpse()
+
+#Recipe 3
+
+recipe_3 <- recipe(total_bikes ~ ., data = trn) |>
+  update_role(date, new_role = "ID") |>
+  step_date(date, features = "dow") |>
+  step_mutate(
+    weekend = factor(
+      if_else(date_dow %in% c("Sat", "Sun"), "weekend", "weekday"),
+      levels = c("weekday", "weekend")
+    )
+  ) |>
+  step_rm(date_dow) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  # Modify interaction specification to use separate terms=
+  step_interact(terms = ~ starts_with("seasons_") * starts_with("holiday_") +
+                  starts_with("seasons_") * avg_temp +
+                  total_rainfall * avg_temp) |>
+  step_poly(total_rainfall, avg_temp, avg_humidity, avg_wind_speed,
+            avg_visibility, avg_dew_point, avg_solar_rad,
+            degree = 2)
+
+recipe_3 |>
+  prep() |>
+  bake(new_data = NULL) |>
+  glimpse()
+
+
+#setup LM engine
+# Set up linear model specification
+lm_spec <- linear_reg() |>
+  set_engine("lm")
+
+# Create workflows for each recipe
+workflow_1 <- workflow() |>
+  add_recipe(recipe_1) |>
+  add_model(lm_spec)
+
+workflow_2 <- workflow() |>
+  add_recipe(recipe_2) |>
+  add_model(lm_spec)
+
+workflow_3 <- workflow() |>
+  add_recipe(recipe_3) |>
+  add_model(lm_spec)
+
+# Fit models using 10-fold CV
+cv_fit_1 <- workflow_1 |>
+  fit_resamples(
+    resamples = folds,
+    metrics = metric_set(rmse)
+  )
+
+cv_fit_2 <- workflow_2 |>
+  fit_resamples(
+    resamples = folds,
+    metrics = metric_set(rmse)
+  )
+
+cv_fit_3 <- workflow_3 |>
+  fit_resamples(
+    resamples = folds,
+    metrics = metric_set(rmse)
+  )
+
+# Compare CV results
+cv_results <- bind_rows(
+  collect_metrics(cv_fit_1) |> mutate(model = "Model 1"),
+  collect_metrics(cv_fit_2) |> mutate(model = "Model 2"),
+  collect_metrics(cv_fit_3) |> mutate(model = "Model 3")
+) |>
+  arrange(mean)
+
+print(cv_results)
+
+
+#Model 3 is best fit
+# Use last_fit with the best model (Model 3)
+final_fit <- workflow_3 |>
+  last_fit(bike_split)
+
+# Get test set metrics
+collect_metrics(final_fit)
+
+# Get coefficients
+final_fit |>
+  extract_fit_parsnip() |>
+  tidy()
+```
+
+
+## LASSO Model
+### Re-import data to align with variable names chosen for hw9
+```{r,  message=FALSE, echo=FALSE}
+bike_data <- read_csv("https://www4.stat.ncsu.edu/~online/datasets/SeoulBikeData.csv",
+                      locale = locale(encoding = "latin1")) |>
+  clean_names() |>
+  mutate(
+    date = dmy(date),
+    seasons = as.factor(seasons),
+    holiday = as.factor(holiday),
+    functioning_day = as.factor(functioning_day)
+  ) |>
+  filter(functioning_day == "Yes")
+
+# Create summaries
+bike_data <- bike_data |>
+  group_by(date, seasons, holiday) |>
+  summarize(
+    total_bikes = sum(rented_bike_count),
+    total_rainfall = sum(rainfall_mm),
+    total_snowfall = sum(snowfall_cm),
+    avg_temp = mean(temperature_c),
+    avg_humidity = mean(humidity_percent),
+    avg_wind_speed = mean(wind_speed_m_s),
+    avg_visibility = mean(visibility_10m),
+    avg_dew_point = mean(dew_point_temperature_c),
+    avg_solar_rad = mean(solar_radiation_mj_m2),
+    .groups = "drop"
+  )
+
+# Split data
+set.seed(123)
+bike_split <- initial_split(bike_data, prop = 0.75, strata = seasons)
+bike_train <- training(bike_split)
+bike_test <- testing(bike_split)
+bike_cv_folds <- vfold_cv(bike_train, v = 10, strata = seasons)
+
+
+lasso_recipe <- recipe(total_bikes ~ ., data = bike_train) |>
+  update_role(date, new_role = "ID") |>
+  step_date(date, features = "dow") |>
+  step_mutate(
+    weekend = factor(
+      if_else(date_dow %in% c("Sat", "Sun"), "weekend", "weekday"),
+      levels = c("weekday", "weekend")
+    )
+  ) |>
+  step_rm(date_dow) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_interact(terms = ~ starts_with("seasons_") * starts_with("holiday_") +
+                  starts_with("seasons_") * avg_temp +
+                  total_rainfall * avg_temp) |>
+  step_poly(avg_temp, avg_humidity, avg_wind_speed, 
+            avg_visibility, avg_dew_point, avg_solar_rad,
+            degree = 2)
+
+# LASSO model specification
+lasso_spec <- linear_reg(penalty = tune(), mixture = 1) |>
+  set_engine("glmnet")
+
+# Create workflow
+lasso_wkf <- workflow() |>
+  add_recipe(lasso_recipe) |>
+  add_model(lasso_spec)
+
+# Tune LASSO
+lasso_grid <- lasso_wkf |>
+  tune_grid(
+    resamples = bike_cv_folds,
+    grid = grid_regular(penalty(), levels = 100),
+    metrics = metric_set(rmse, mae)
+  )
+
+# Get best LASSO model
+#pull out best model with select_best() and finalize_workflow()
+lasso_lowest_rmse <- select_best(lasso_grid, metric = "rmse")
+lasso_final <- finalize_workflow(lasso_wkf, lasso_lowest_rmse)
+
+#Fit to training data
+lasso_final_fitted <- finalize_workflow(lasso_wkf, lasso_lowest_rmse) |>
+  fit(bike_train)
+
+tidy(lasso_final_fitted)
+#Fit to full training + test + get fit + performance metrics
+lasso_fit <- last_fit(lasso_final, bike_split)
+```
+
+## Regression Tree
+```{r,  message=FALSE, echo=FALSE}
+bike_data <- read_csv("https://www4.stat.ncsu.edu/~online/datasets/SeoulBikeData.csv",
+                      locale = locale(encoding = "latin1")) |>
+  clean_names() |>
+  mutate(
+    date = dmy(date),
+    seasons = as.factor(seasons),
+    holiday = as.factor(holiday),
+    functioning_day = as.factor(functioning_day)
+  ) |>
+  filter(functioning_day == "Yes")
+
+# Create daily summaries
+bike_data <- bike_data |>
+  group_by(date, seasons, holiday) |>
+  summarize(
+    total_bikes = sum(rented_bike_count),
+    total_rainfall = sum(rainfall_mm),
+    total_snowfall = sum(snowfall_cm),
+    avg_temp = mean(temperature_c),
+    avg_humidity = mean(humidity_percent),
+    avg_wind_speed = mean(wind_speed_m_s),
+    avg_visibility = mean(visibility_10m),
+    avg_dew_point = mean(dew_point_temperature_c),
+    avg_solar_rad = mean(solar_radiation_mj_m2),
+    .groups = "drop"
+  )
+
+# Split data
+set.seed(123)
+bike_split <- initial_split(bike_data, prop = 0.75, strata = seasons)
+bike_train <- training(bike_split)
+bike_test <- testing(bike_split)
+bike_cv_folds <- vfold_cv(bike_train, v = 10, strata = seasons)
+
+
+#2. Setup recipes for data model
+tree_rec <- recipe(total_bikes ~ ., data = bike_train) |>
+  update_role(date, new_role = "ID") |>
+  step_date(date, features = "dow") |>
+  step_mutate(
+    weekend = factor(
+      if_else(date_dow %in% c("Sat", "Sun"), "weekend", "weekday"),
+      levels = c("weekday", "weekend")
+    )
+  ) |>
+  step_rm(date_dow) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors())
+
+# 3. Set up model type and engine
+tree_mod <- decision_tree(tree_depth = tune(),
+                          min_n = 20,
+                          cost_complexity = tune()) |>
+  set_engine("rpart") |>
+  set_mode("regression")
+
+# 4. Create workflows
+tree_wkf <- workflow() |>
+  add_recipe(tree_rec) |>
+  add_model(tree_mod)
+
+
+
+#manually specify how many of each tuning parameter you want with grid_regular
+tree_grid <- grid_regular(cost_complexity(),
+                          tree_depth(),
+                          levels = c(10,5))
+
+
+# 5. Fit to CV folds. Use tune_grid() to fit models
+
+tree_cv_fit <- tree_wkf |>
+  tune_grid(resamples = bike_cv_folds,
+            grid = tree_grid)
+
+tree_cv_fit |>
+  collect_metrics()
+
+
+#plot
+tree_cv_fit %>%
+  collect_metrics() %>%
+  mutate(tree_depth = factor(tree_depth)) %>%
+  ggplot(aes(cost_complexity, mean, color = tree_depth)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) +
+  scale_x_log10(labels = scales::label_number()) +
+  scale_color_viridis_d(option = "plasma", begin = .9, end = 0)
+
+#sort by smallest RMSE
+tree_cv_fit |>
+  collect_metrics() |>
+  filter(.metric == "rmse") |>
+  arrange(mean)
+
+#select best to select best model's tuning parameter values and metric specification
+tree_best_params <- select_best(tree_cv_fit, metric = "rmse")
+tree_best_params
+
+#finalize workflow model on the training set with finalize_workflow
+tree_final_wkf <- tree_wkf |>
+  finalize_workflow(tree_best_params)
+
+tree_final_fit <- tree_final_wkf |>
+  last_fit(bike_split)
+tree_final_fit
+
+tree_final_fit |>
+  collect_metrics()
+
+tree_final_model <- extract_workflow(tree_final_fit)
+tree_final_model
+
+tree_final_model |>
+  extract_fit_engine() |>
+  rpart.plot::rpart.plot(roundint = FALSE)
+
+```
+
+
+##  BAGGED Tree
+```{r,  message=FALSE, echo=FALSE}
+# Set recipe 
+bag_rec <- recipe(total_bikes ~ ., data = bike_train) |>
+ update_role(date, new_role = "ID") |>
+ step_date(date, features = "dow") |>
+ step_mutate(
+   weekend = factor(
+     if_else(date_dow %in% c("Sat", "Sun"), "weekend", "weekday"),
+     levels = c("weekday", "weekend")
+   )
+ ) |>
+ step_rm(date_dow) |>
+ step_normalize(all_numeric_predictors()) |>
+ step_dummy(all_nominal_predictors())
+
+# Set model
+bag_spec <- bag_tree(
+ tree_depth = 5, 
+ min_n = 10,
+ cost_complexity = tune()
+) |>
+ set_engine("rpart") |>
+ set_mode("regression")
+
+# Create workflow
+bag_wkf <- workflow() |>
+ add_recipe(bag_rec) |>
+ add_model(bag_spec) 
+
+# Tune model
+bag_fit <- bag_wkf |>
+ tune_grid(
+   resamples = bike_cv_folds,
+   grid = grid_regular(cost_complexity(), levels = 15),
+   metrics = metric_set(rmse, mae)
+ )
+
+# Get metrics
+bag_fit |>
+ collect_metrics() |>
+ filter(.metric == "rmse") |>
+ arrange(mean)
+
+# Get best parameters
+bag_best_params <- select_best(bag_fit, metric = "rmse")
+
+# Finalize workflow
+bag_final_wkf <- bag_wkf |>
+ finalize_workflow(bag_best_params)
+
+# Final fit and evaluation  
+bag_final_fit <- bag_final_wkf |>
+ last_fit(bike_split, metrics = metric_set(rmse, mae))
+```
+
+
+## Random Forest
+```{r,  message=FALSE, echo=FALSE}
+rf_rec  <- recipe(total_bikes ~ ., data = bike_train) |>
+ update_role(date, new_role = "ID") |>
+ step_date(date, features = "dow") |>
+ step_mutate(
+   weekend = factor(
+     if_else(date_dow %in% c("Sat", "Sun"), "weekend", "weekday"),
+     levels = c("weekday", "weekend")
+   )
+ ) |>
+ step_rm(date_dow) |>
+ step_normalize(all_numeric_predictors()) |>
+ step_dummy(all_nominal_predictors())
+
+# Specify model with tuning
+rf_spec <- rand_forest(mtry = tune()) |>  
+  set_engine("ranger", importance = "permutation") |>
+  set_mode("regression")
+
+# Create workflow  
+rf_wkf <- workflow() |>
+  add_recipe(rf_rec) |>
+  add_model(rf_spec)
+
+# Tune model with cross validation
+rf_fit <- rf_wkf |>
+  tune_grid(
+    resamples = bike_cv_folds,
+    grid = tibble(mtry = c(1, 2)),
+    metrics = metric_set(rmse, rsq)
+  )
+
+# Get best parameters
+rf_best_params <- select_best(rf_fit, metric = "rmse")
+
+# Finalize workflow with best parameters
+rf_final_wkf <- rf_wkf |>
+  finalize_workflow(rf_best_params)
+
+# Fit final model
+rf_final_fit <- rf_final_wkf |>
+  last_fit(bike_split)
+
+# Extract final model if needed
+rf_final_model <- rf_final_fit |>
+  extract_fit_parsnip()
+```
+
+## Compare Models
+```{r}
+# 1. Final fits for each model type
+mlr_final_fit <- workflow_3 |> 
+  last_fit(bike_split, metrics = metric_set(rmse, mae))
+
+lasso_final_fit <- lasso_wkf |>
+  finalize_workflow(lasso_lowest_rmse) |>
+  last_fit(bike_split, metrics = metric_set(rmse, mae))
+
+tree_final_fit <- tree_final_wkf |>
+  last_fit(bike_split, metrics = metric_set(rmse, mae))
+
+bag_final_fit <- bag_final_wkf |>
+  last_fit(bike_split, metrics = metric_set(rmse, mae, rsq))
+
+rf_final_fit <- rf_final_wkf |>
+  last_fit(bike_split, metrics = metric_set(rmse, mae))
+
+# 2. Create comparison dataframes
+final_metrics <- tibble(
+    model = c("MLR", "LASSO", "Regression Tree", "Bagged Tree", "Random Forest"),
+    rmse = c(
+        mlr_final_fit |> collect_metrics() |> filter(.metric == "rmse") |> pull(.estimate),
+        lasso_final_fit |> collect_metrics() |> filter(.metric == "rmse") |> pull(.estimate),
+        tree_final_fit |> collect_metrics() |> filter(.metric == "rmse") |> pull(.estimate),
+        bag_final_fit |> collect_metrics() |> filter(.metric == "rmse") |> pull(.estimate),
+        rf_final_fit |> collect_metrics() |> filter(.metric == "rmse") |> pull(.estimate)
+    )
+)
+
+final_mae <- tibble(
+    model = c("MLR", "LASSO", "Regression Tree", "Bagged Tree", "Random Forest"),
+    mae = c(
+        mlr_final_fit |> collect_metrics() |> filter(.metric == "mae") |> pull(.estimate),
+        lasso_final_fit |> collect_metrics() |> filter(.metric == "mae") |> pull(.estimate),
+        tree_final_fit |> collect_metrics() |> filter(.metric == "mae") |> pull(.estimate),
+        bag_final_fit |> collect_metrics() |> filter(.metric == "mae") |> pull(.estimate),
+        rf_final_fit |> collect_metrics() |> filter(.metric == "mae") |> pull(.estimate)
+    )
+)
+
+# 3. Combine metrics
+cat("### RMSE by Model")
+knitr::kable(final_metrics)
+
+cat("### MAE by Model")
+knitr::kable(final_mae)
+
+cat("### Combined Performance Metrics")
+final_comparison <- final_metrics %>%
+  left_join(final_mae, by = "model")
+knitr::kable(final_comparison)
+
+```
+
+## Summarize Models
+### Models of MLR, LASSO, Regression Tree, Bagged Tree, and Random Forest were compared againt the Seoul Bike Data data set
+### Models were tuned by 10-fold cross-validation
+
+### Conclusion: MLR 3 model provided the best fit of all models assessed against the metric of RMSE: 2913 and MAE: 2202
+```{r}
+# 1. Final coefficient tables for LASSO and MLR
+mlr_coef <- mlr_final_fit |>
+  extract_fit_parsnip() |>
+  tidy() |>
+  knitr::kable()
+
+lasso_coef <- lasso_final_fit |>
+  extract_fit_parsnip() |>
+  tidy()  |>
+  knitr::kable()
+
+# 2. Plot regression tree
+tree_plot <- tree_final_model |>
+  extract_fit_engine() |>
+  rpart.plot::rpart.plot(roundint = FALSE, main = "Regression Tree Final Model")
+
+# 3. Variable importance plots
+# For bagged trees
+bag_final_model <- bag_final_fit |>
+  extract_fit_parsnip()
+
+bag_importance <- bag_final_model |>
+  extract_fit_engine() |>
+  var_imp() |>
+  mutate(term = factor(term, levels = term)) |>
+  ggplot(aes(x = term, y = value)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Bagged Trees Variable Importance",
+       x = "Variable",
+       y = "Importance")
+# For random forest 
+rf_final_model <- rf_final_fit |>
+  extract_fit_parsnip()
+
+rf_importance <- vip(rf_final_model) +
+  labs(title = "Random Forest Variable Importance")
+
+# Display plots
+print(bag_importance)
+print(rf_importance)
+
+# 4. Show coefficients
+knitr::kable(mlr_coef)
+
+knitr::kable(lasso_coef)
+
+# 5. Fit best model to entire dataset
+best_model <- workflow_3 |>
+  fit(bike_data)
+
+best_model |>
+  extract_fit_parsnip() |>
+  tidy() |>
+  knitr::kable()
+```
+
